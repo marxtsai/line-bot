@@ -75,8 +75,8 @@ async function handleEvent(event) {
   console.log("使用者輸入：", msg); // 在 Render Log 中顯示使用者輸入
 
   // Google Apps Script Web App 的 URL
-  // ✅ 請確認這是你的最新部署 URL (版本 9)
-  const appsScriptUrl = 'https://script.google.com/macros/s/AKfycbxT8-6e8d-ja8b6p5t6z9RdVeHeLgi9vHk-3Ch84_y1GvLMR4YlQxFYkOpkFVOdNt89YA/exec';
+  // ✅ 這是你最新提供並確認的 Apps Script Web App URL (版本 9)
+  const appsScriptUrl = 'https://script.google.com/macros/s/AKfycbxQuU9NprVGnozqSg8HQD1FxB7e8ja0EniuP_-ERTR-OXJaPQpVXemiJuQktTc3KP_b/exec';
 
   // --- FAQ 回覆 ---
   if (msg.includes('faq') || msg.includes('常見問題')) {
@@ -91,7 +91,7 @@ async function handleEvent(event) {
       const data = response.data;
       if (data && data.reply) {
         if (data.timestamp) {
-            console.log(`FAQ Response Timestamp for update_task_status: ${data.timestamp}`);
+            console.log(`FAQ Response Timestamp: ${data.timestamp}`); // 修正了變數名稱，更清晰
         }
         return client.replyMessage(replyToken, {
           type: 'text',
@@ -99,6 +99,8 @@ async function handleEvent(event) {
         });
       } else {
         console.warn('Apps Script returned no valid reply for FAQ.');
+        // 額外日誌，幫助診斷 Apps Script 回傳的內容
+        console.warn('Apps Script FAQ raw response:', JSON.stringify(response.data)); 
         return client.replyMessage(replyToken, {
           type: 'text',
           text: '很抱歉，獲取常見問題時發生錯誤或無相關資訊。'
@@ -121,18 +123,24 @@ async function handleEvent(event) {
         console.log('Sending appointment request to Apps Script...');
         const response = await axios.post(appsScriptUrl, {
           type: 'appointment',
-          payload: { message: event.message.text },
+          payload: { message: event.message.text }, // 這個 payload 應該包含 date 和 time
           userId: userId
         });
 
         const data = response.data;
-        if (data && data.message) {
+        if (data && data.message) { // 預約成功應該是 data.message
+            // 可選：如果你希望預約請求也回傳時間戳記，可以在這裡加入
+            if (data.timestamp) {
+                console.log(`Appointment Response Timestamp: ${data.timestamp}`);
+            }
             return client.replyMessage(replyToken, {
                 type: 'text',
                 text: data.message
             });
         } else {
             console.warn('Apps Script returned no valid message for appointment.');
+            // 額外日誌，幫助診斷 Apps Script 回傳的內容
+            console.warn('Apps Script Appointment raw response:', JSON.stringify(response.data)); 
             return client.replyMessage(replyToken, {
                 type: 'text',
                 text: '預約請求處理失敗，請稍後再試。'
