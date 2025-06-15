@@ -1,10 +1,10 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
-const axios = require('axios'); // 需加這行
+const axios = require('axios');
 
 const config = {
-  channelAccessToken: 'UF2P/f6qluwyT2D6ieAB/7FLixf7x72SyPsSpMTtdeGtUsDev7lTByXHMlMvp7XEY2CeFPHq271St3i3yrmd8bRKhI27XSnFnEH+L1dEej1JxBdMH2zUbWK+d8qLmT3SR4VXnqDXp2q08rWqvFRIDgdB04t89/1O/w1cDnyilFU=',
-  channelSecret: 'ef129f320d287a79f5579f5801a74368',
+  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+  channelSecret: process.env.CHANNEL_SECRET,
 };
 
 const client = new line.Client(config);
@@ -101,9 +101,8 @@ async function handleEvent(event) {
     return client.replyMessage(replyToken, appointmentCard);
   }
 
-  // 偵測「我要預約」→ 寫入 Google Sheet
+  // 「我要預約」→ 寫入 Google Sheet
   if (msg.includes('我要預約')) {
-    // 寫入 Google Apps Script Web App
     await axios.post(
       'https://script.google.com/macros/s/AKfycbxT8-6e8d-ja8b6p5t6z9RdVeHeLgi9vHk-3Ch84_y1GvLMR4YlQxFYkOpkFVOdNt89YA/exec',
       {
@@ -117,6 +116,7 @@ async function handleEvent(event) {
     });
   }
 
+  // 預設回覆
   return client.replyMessage(replyToken, {
     type: 'text',
     text: `你說的是：「${event.message.text}」`,
@@ -127,4 +127,5 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`LINE bot 伺服器運行中，port: ${port}`);
 });
+
 
