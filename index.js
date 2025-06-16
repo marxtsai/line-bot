@@ -1,206 +1,261 @@
+'use strict';
+
+// =================================================================
+// 【最終版】Node.js 預約系統 (index.js)
+// 目的：處理 LINE Webhook，發送預約表單，並將資料轉發至 Google Apps Script
+// =================================================================
+
 const express = require('express');
 const line = require('@line/bot-sdk');
 const axios = require('axios');
 
-// LINE Bot 設定
+// --- 配置區塊 (已填入您的資訊) ---
 const config = {
-  channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
-  channelSecret: process.env.CHANNEL_SECRET,
+    channelAccessToken: 'i44rK1vCf9f9NGu1x/2w1umIY0fvPOrr9n5WLXqIn5anr73xF+Sy6nhuE3D2WMPPY2CeFPHq271St3i3yrmd8bRKhI27XSnFnEH+L1dEej2kcnD6Bo9zXbzbjDy4mCTSFYsny4aLVrBo8X0igHWtIAdB04t89/1O/w1cDnyilFU=',
+    channelSecret: 'd52699ba45f0fe91d719b81492cc29dd',
 };
 
-// 初始化 LINE Client
+// 這是您最新部署的 Google Apps Script (GAS) 網址 (已填入您的資訊)
+const GAS_URL = 'https://script.google.com/macros/s/AKfycbxQuU9NprVGnozqSg8HQD1FxB7e8ja0EniuP_-ERTR-OXJaPQpVXemiJuQktTc3KP_b/exec'; 
+
+// --- 程式主要邏輯 ---
 const client = new line.Client(config);
 const app = express();
 
-// ✅ 臨時用於除錯：打印實際讀取到的環境變數的值
-// !!! 警告：這會讓你的 CHANNEL_SECRET 和 CHANNEL_ACCESS_TOKEN 顯示在 Render 的公開日誌中。
-// !!! 除錯完成後，務必將這些 console.log 語句刪除，並重新部署！
-console.log("DEBUG_ENV: Loaded CHANNEL_ACCESS_TOKEN (first 10 chars):", config.channelAccessToken ? config.channelAccessToken.substring(0, 10) + '...' : 'NOT_SET');
-console.log("DEBUG_ENV: Loaded CHANNEL_SECRET (full value):", config.channelSecret || 'NOT_SET');
+// 用於在記憶體中儲存每個使用者的狀態
+// 注意：若伺服器重啟 (例如在 Render 上)，此資料會遺失。
+const userStates = {};
 
-
-// LINE 的 Webhook 請求體是 JSON 格式，Express 需要這個中間件來解析
-// 注意：如果請求的 Content-Type 不正確，express.json() 可能會報錯。
-app.use(express.json({
-  verify: (req, res, buf) => {
-    // 這個 verify 函數可以確保原始請求體被保留下來，供 line.middleware 使用
-    req.rawBody = buf;
-  }
-}));
-
-// Webhook 路由
-app.post('/webhook', (req, res) => { // 移除 line.middleware 放在 try/catch 內部
-  try {
-    // 手動調用 line.middleware 進行簽名驗證
-    // 這樣我們可以更精確地捕獲和日誌化 SignatureValidationFailed 錯誤
-    line.middleware(config)(req, res, async () => {
-      // 如果簽名驗證成功，這裡的代碼才會執行
-      try {
-        await Promise.all(req.body.events.map(handleEvent));
-        // 成功處理所有事件後，返回 200 OK 給 LINE 平台
-        res.json({}); 
-      } catch (err) {
-        // 捕獲 handleEvent 內部或其他非簽名驗證錯誤，記錄下來
-        console.error('Webhook (handleEvent) error:', err);
-        // 即使發生錯誤，也要返回 200 OK 給 LINE 平台
-        res.status(200).json({ status: 'error', message: err.message || 'Unknown processing error occurred' });
-      }
-    });
-  } catch (err) {
-    // 捕獲 line.middleware (主要是 SignatureValidationFailed) 拋出的錯誤
-    if (err instanceof line.SignatureValidationFailed) {
-      console.error('Webhook (SignatureValidationFailed) error:', err.message);
-      // 對於簽名驗證失敗，也返回 200 OK，但可以不回覆訊息
-      res.status(200).json({ status: 'error', message: 'Signature validation failed' });
-    } else {
-      // 捕獲其他未預期的頂層錯誤
-      console.error('Webhook (unexpected top-level) error:', err);
-      res.status(200).json({ status: 'error', message: err.message || 'Unexpected top-level error occurred' });
-    }
-  }
+// LINE Webhook 的路由
+app.post('/webhook', line.middleware(config), (req, res) => {
+    Promise
+        .all(req.body.events.map(handleEvent))
+        .then((result) => res.json(result))
+        .catch((err) => {
+            console.error('Webhook Error:', err);
+            res.status(500).end();
+        });
 });
 
-
-// 事件處理函數
+// 主要事件處理函式
 async function handleEvent(event) {
-  // 只處理文字訊息
-  if (event.type !== 'message' || event.message.type !== 'text') {
-    console.log("非文字訊息或非訊息事件，忽略。");
-    return;
-  }
-
-  const msg = event.message.text.toLowerCase();
-  const replyToken = event.replyToken;
-  const userId = event.source.userId;
-  console.log("使用者輸入：", msg); // 在 Render Log 中顯示使用者輸入
-
-  // Google Apps Script Web App 的 URL
-  // ✅ 這是你最新提供並確認的 Apps Script Web App URL (版本 9)
-  const appsScriptUrl = 'https://script.google.com/macros/s/AKfycbxQuU9NprVGnozqSg8HQD1FxB7e8ja0EniuP_-ERTR-OXJaPQpVXemiJuQktTc3KP_b/exec';
-
-  // --- FAQ 回覆 ---
-  if (msg.includes('faq') || msg.includes('常見問題')) {
-    try {
-      console.log('Sending FAQ request to Apps Script...');
-      const response = await axios.post(appsScriptUrl, {
-        type: 'faq',
-        payload: { message: event.message.text },
-        userId: userId
-      });
-
-      const data = response.data;
-      if (data && data.reply) {
-        if (data.timestamp) {
-            console.log(`FAQ Response Timestamp: ${data.timestamp}`); // 修正了變數名稱，更清晰
-        }
-        return client.replyMessage(replyToken, {
-          type: 'text',
-          text: data.reply
-        });
-      } else {
-        console.warn('Apps Script returned no valid reply for FAQ.');
-        // 額外日誌，幫助診斷 Apps Script 回傳的內容
-        console.warn('Apps Script FAQ raw response:', JSON.stringify(response.data)); 
-        return client.replyMessage(replyToken, {
-          type: 'text',
-          text: '很抱歉，獲取常見問題時發生錯誤或無相關資訊。'
-        });
-      }
-    } catch (error) {
-      console.error('Error calling Apps Script for FAQ:', error.message || error);
-      // 捕獲 Apps Script 調用錯誤，並回覆使用者
-      return client.replyMessage(replyToken, {
-        type: 'text',
-        text: '抱歉，處理常見問題時發生系統錯誤。'
-      });
+    // 過濾掉非文字訊息和非 postback 事件
+    if ((event.type !== 'message' || event.message.type !== 'text') && event.type !== 'postback') {
+        return Promise.resolve(null);
     }
-  }
-
-  // --- 預約相關邏輯 ---
-  if (msg.includes('預約')) {
-    if (msg.includes('我要預約')) {
-      try {
-        console.log('Sending appointment request to Apps Script...');
-        const response = await axios.post(appsScriptUrl, {
-          type: 'appointment',
-          payload: { message: event.message.text }, // 這個 payload 應該包含 date 和 time
-          userId: userId
-        });
-
-        const data = response.data;
-        if (data && data.message) { // 預約成功應該是 data.message
-            // 可選：如果你希望預約請求也回傳時間戳記，可以在這裡加入
-            if (data.timestamp) {
-                console.log(`Appointment Response Timestamp: ${data.timestamp}`);
-            }
-            return client.replyMessage(replyToken, {
-                type: 'text',
-                text: data.message
-            });
-        } else {
-            console.warn('Apps Script returned no valid message for appointment.');
-            // 額外日誌，幫助診斷 Apps Script 回傳的內容
-            console.warn('Apps Script Appointment raw response:', JSON.stringify(response.data)); 
-            return client.replyMessage(replyToken, {
-                type: 'text',
-                text: '預約請求處理失敗，請稍後再試。'
-            });
-        }
-      } catch (error) {
-        console.error('Error calling Apps Script for appointment:', error.message || error);
-        return client.replyMessage(replyToken, {
-          type: 'text',
-          text: '抱歉，處理預約時發生系統錯誤。'
-        });
-      }
-
-    } else {
-      // 回覆預約 Flex Message 卡片
-      const appointmentCard = {
-        type: 'flex',
-        altText: '預約卡片',
-        contents: {
-          type: 'bubble',
-          body: {
-            type: 'box',
-            layout: 'vertical',
-            contents: [
-              { type: 'text', text: '預約服務', weight: 'bold', size: 'md' },
-              { type: 'text', text: '日期：2025/06/20', size: 'sm' }, 
-              { type: 'text', text: '時段：上午', size: 'sm' }     
-            ]
-          },
-          footer: {
-            type: 'box',
-            layout: 'vertical',
-            contents: [
-              {
-                type: 'button',
-                style: 'primary',
-                color: '#00B900',
-                action: {
-                  type: 'message',
-                  label: '立即預約',
-                  text: '我要預約 2025/06/20 上午' 
-                }
-              }
-            ]
-          }
-        }
-      };
-      return client.replyMessage(replyToken, appointmentCard);
+    
+    // 如果是 postback 事件，直接交給 postback 處理器
+    if (event.type === 'postback') {
+        return handlePostback(event);
     }
-  }
-  
-  // --- 預設回覆 ---
-  return client.replyMessage(replyToken, {
-    type: 'text',
-    text: `你說的是：「${event.message.text}」`
-  });
+
+    // --- 以下是處理文字訊息的部分 ---
+    const userId = event.source.userId;
+    const userMessage = event.message.text.trim();
+    const currentState = userStates[userId];
+
+    // 關鍵字 "我要預約" 觸發預約流程
+    if (userMessage === '我要預約' && (!currentState || currentState.step !== 'waiting_for_name')) {
+        userStates[userId] = {
+            step: 'waiting_for_name', // 步驟1: 等待使用者輸入姓名
+            name: null,
+            date: null,
+            time: null,
+        };
+        return client.replyMessage(event.replyToken, {
+            type: 'text',
+            text: '好的，我們開始進行預約。\n請問您的預約姓名是？'
+        });
+    }
+
+    // 當系統正在等待使用者輸入姓名時
+    if (currentState && currentState.step === 'waiting_for_name') {
+        currentState.name = userMessage;
+        currentState.step = 'waiting_for_submission'; // 步驟2: 等待表單提交
+
+        const flexMessage = getBookingFlexMessage();
+        
+        return client.replyMessage(event.replyToken, [
+            { type: 'text', text: `好的，${userMessage}！\n請選擇您希望的預約日期與時間。` },
+            flexMessage
+        ]);
+    }
+    
+    return Promise.resolve(null);
 }
 
-// 監聽 PORT
+// Postback 事件處理器 (處理使用者點擊 Flex Message 按鈕的事件)
+async function handlePostback(event) {
+    const userId = event.source.userId;
+    const postbackData = event.postback.data;
+    const currentState = userStates[userId];
+
+    // 解析 postback data，確認 action 是否為 'submit_booking'
+    if (postbackData === 'action=submit_booking' && currentState && currentState.step === 'waiting_for_submission') {
+        
+        // 從 postback 的 params 中取得使用者選擇的日期和時間
+        const bookingDate = event.postback.params.date;
+        const bookingTime = event.postback.params.time;
+
+        // --- 後端欄位驗證 ---
+        if (!currentState.name || !bookingDate || !bookingTime) {
+            delete userStates[userId]; // 清除不完整的狀態
+            return client.replyMessage(event.replyToken, { 
+                type: 'text', 
+                text: '抱歉，預約資料不完整（缺少姓名、日期或時間），請重新輸入「我要預約」開始流程。' 
+            });
+        }
+        
+        currentState.date = bookingDate;
+        currentState.time = bookingTime;
+
+        try {
+            // 先回覆一個 "處理中" 的訊息，提升使用者體驗
+            await client.replyMessage(event.replyToken, { type: 'text', text: '收到您的預約，正在為您確認時段是否可用...' });
+
+            // 將驗證後的完整資料發送到 Google Apps Script
+            const response = await axios.post(GAS_URL, {
+                name: currentState.name,
+                date: currentState.date,
+                time: currentState.time,
+            });
+
+            // 清除這位使用者的狀態，完成此趟預約流程
+            delete userStates[userId];
+
+            // 根據 Google Apps Script 的回傳結果，用 pushMessage 傳送最終訊息給使用者
+            return client.pushMessage(userId, {
+                type: 'text',
+                text: response.data.message, // 直接使用 GAS 回傳的成功或失敗訊息
+            });
+
+        } catch (error) {
+            delete userStates[userId]; // 發生錯誤時也要清除狀態
+            console.error('Error during GAS communication:', error.response ? error.response.data : error.message);
+            // 系統發生錯誤時，回覆一個通用的錯誤訊息
+            return client.pushMessage(userId, {
+                type: 'text',
+                text: '抱歉，預約系統發生了一些問題，請稍後再試或聯絡客服人員。',
+            });
+        }
+    }
+    
+    return Promise.resolve(null);
+}
+
+// 產生預約表單 Flex Message 的函式
+function getBookingFlexMessage() {
+    return {
+      "type": "flex",
+      "altText": "AI智慧診所預約表單",
+      "contents": {
+        "type": "bubble",
+        "header": {
+          "type": "box",
+          "layout": "vertical",
+          "contents": [
+            {
+              "type": "text",
+              "text": "AI智慧診所預約",
+              "weight": "bold",
+              "size": "xl",
+              "color": "#FFFFFF"
+            }
+          ],
+          "backgroundColor": "#007BFF",
+          "paddingAll": "20px"
+        },
+        "body": {
+          "type": "box",
+          "layout": "vertical",
+          "spacing": "md",
+          "contents": [
+            {
+              "type": "text",
+              "text": "請點選下方按鈕，選擇日期與時間",
+              "wrap": true,
+              "size": "md"
+            },
+            {
+              "type": "separator"
+            },
+            {
+              "type": "box",
+              "layout": "horizontal",
+              "contents": [
+                {
+                  "type": "text",
+                  "text": "預約日期",
+                  "flex": 2,
+                  "gravity": "center",
+                  "weight": "bold"
+                },
+                {
+                  "type": "button",
+                  "action": {
+                    "type": "datetimepicker",
+                    "label": "選擇日期",
+                    "data": "action=select_date",
+                    "mode": "date"
+                  },
+                  "flex": 5,
+                  "style": "secondary",
+                  "height": "sm"
+                }
+              ]
+            },
+            {
+              "type": "box",
+              "layout": "horizontal",
+              "contents": [
+                {
+                  "type": "text",
+                  "text": "預約時間",
+                  "flex": 2,
+                  "gravity": "center",
+                  "weight": "bold"
+                },
+                {
+                  "type": "button",
+                  "action": {
+                    "type": "datetimepicker",
+                    "label": "選擇時間",
+                    "data": "action=select_time",
+                    "mode": "time"
+                  },
+                  "flex": 5,
+                  "style": "secondary",
+                  "height": "sm"
+                }
+              ]
+            }
+          ]
+        },
+        "footer": {
+          "type": "box",
+          "layout": "vertical",
+          "contents": [
+            {
+              "type": "button",
+              "action": {
+                "type": "postback",
+                "label": "送出預約",
+                "data": "action=submit_booking",
+                "displayText": "正在為您處理預約..."
+              },
+              "style": "primary",
+              "color": "#007BFF"
+            }
+          ]
+        }
+      }
+    };
+}
+
+
+// 監聽指定的 port，準備接收來自 LINE 的請求
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`LINE bot 伺服器運行中，port: ${port}`);
+    console.log(`Server is listening on port ${port}`);
 });
+

@@ -1,17 +1,14 @@
 {
-  "name": "line-bot",
+  "name": "line-bot-render-middleware",
   "version": "1.0.0",
+  "description": "LINE Bot middleware server.",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
-    "@line/bot-sdk": "^10.0.0",
-    "axios": "^1.10.0",
-    "express": "^5.1.0"
+    "@line/bot-sdk": "^8.4.1",
+    "axios": "^1.7.2",
+    "express": "^4.19.2"
   }
 }
