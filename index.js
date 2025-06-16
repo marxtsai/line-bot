@@ -1,8 +1,10 @@
 'use strict';
 
 // =================================================================
-// 【修正版】Node.js 預約系統 (index.js)
-// 修正了 postback 事件的處理邏輯，確保能正確儲存並發送預約資料
+// 【最終完美版】Node.js 預約系統 (index.js)
+// 1. 新增：選擇日期/時間後，發送即時文字回饋。
+// 2. 保留：增加 axios 請求超時時間，提高對 GAS 冷啟動的容錯率。
+// 3. 保留：增加 "processing" 狀態，防止使用者重複提交預約。
 // =================================================================
 
 const express = require('express');
@@ -22,10 +24,8 @@ const GAS_URL = 'https://script.google.com/macros/s/AKfycbxQuU9NprVGnozqSg8HQD1F
 const client = new line.Client(config);
 const app = express();
 
-// 用於在記憶體中儲存每個使用者的狀態
 const userStates = {};
 
-// LINE Webhook 的路由
 app.post('/webhook', line.middleware(config), (req, res) => {
     Promise
         .all(req.body.events.map(handleEvent))
@@ -36,7 +36,6 @@ app.post('/webhook', line.middleware(config), (req, res) => {
         });
 });
 
-// 主要事件處理函式
 async function handleEvent(event) {
     if ((event.type !== 'message' || event.message.type !== 'text') && event.type !== 'postback') {
         return Promise.resolve(null);
@@ -50,7 +49,7 @@ async function handleEvent(event) {
     const userMessage = event.message.text.trim();
     const currentState = userStates[userId];
 
-    if (userMessage === '我要預約' && (!currentState || currentState.step !== 'waiting_for_name')) {
+    if (userMessage === '我要預約') {
         userStates[userId] = {
             step: 'waiting_for_name',
             name: null,
@@ -77,52 +76,60 @@ async function handleEvent(event) {
     return Promise.resolve(null);
 }
 
-// Postback 事件處理器 (處理使用者點擊 Flex Message 按鈕的事件)
 async function handlePostback(event) {
     const userId = event.source.userId;
     const postbackData = event.postback.data;
     const currentState = userStates[userId];
 
-    if (!currentState || currentState.step !== 'waiting_for_submission') {
-        return Promise.resolve(null); // 如果使用者不在預約流程中，則忽略
-    }
+    if (!currentState) return Promise.resolve(null);
 
-    // --- 【修正後的邏輯】 ---
-    // 情況一：使用者選擇了日期
-    if (postbackData === 'action=select_date' && event.postback.params && event.postback.params.date) {
-        currentState.date = event.postback.params.date;
-        console.log(`User ${userId} selected date: ${currentState.date}`);
-        // 不需要回覆訊息，LINE 會自動處理
+    // 【新功能】處理日期選擇
+    if (postbackData.startsWith('action=select_date') && event.postback.params && event.postback.params.date) {
+        if (currentState.step === 'waiting_for_submission' || currentState.step === 'processing') {
+             currentState.date = event.postback.params.date;
+             console.log(`User ${userId} selected date: ${currentState.date}`);
+             // 發送即時回饋訊息
+             const feedbackText = `📅 已收到你的日期選擇：${currentState.date}\n（提醒你：上方表單畫面不會跟著更新，但系統已成功記錄喔）`;
+             return client.pushMessage(userId, { type: 'text', text: feedbackText });
+        }
         return Promise.resolve(null);
     }
 
-    // 情況二：使用者選擇了時間
-    if (postbackData === 'action=select_time' && event.postback.params && event.postback.params.time) {
-        currentState.time = event.postback.params.time;
-        console.log(`User ${userId} selected time: ${currentState.time}`);
-        // 不需要回覆訊息
+    // 【新功能】處理時間選擇
+    if (postbackData.startsWith('action=select_time') && event.postback.params && event.postback.params.time) {
+         if (currentState.step === 'waiting_for_submission' || currentState.step === 'processing') {
+            currentState.time = event.postback.params.time;
+            console.log(`User ${userId} selected time: ${currentState.time}`);
+            // 發送即時回饋訊息
+            const feedbackText = `🕒 時間選擇完成：${currentState.time}\n（小提醒：上方表單畫面不會變，但我們這邊已經收到你的選擇了）`;
+            return client.pushMessage(userId, { type: 'text', text: feedbackText });
+        }
         return Promise.resolve(null);
     }
 
-    // 情況三：使用者按下「送出預約」
+    // 處理最終提交
     if (postbackData === 'action=submit_booking') {
-        // 從我們自己儲存的狀態中取得姓名、日期、時間
+        if (currentState.step !== 'waiting_for_submission') {
+            return client.replyMessage(event.replyToken, { type: 'text', text: '正在處理您先前的預約，請稍候...' });
+        }
+
         const { name, date, time } = currentState;
 
-        // 後端欄位驗證 (現在更重要了)
         if (!name || !date || !time) {
             return client.replyMessage(event.replyToken, { 
                 type: 'text', 
                 text: '抱歉，您尚未選擇完整的預約資訊（日期或時間），請在表單上點選後再送出。' 
             });
         }
+
+        currentState.step = 'processing'; // 進入處理中狀態，防止重複提交
         
         try {
             await client.replyMessage(event.replyToken, { type: 'text', text: '收到您的預約，正在為您確認時段是否可用...' });
+            
+            const response = await axios.post(GAS_URL, { name, date, time }, { timeout: 25000 });
 
-            const response = await axios.post(GAS_URL, { name, date, time });
-
-            delete userStates[userId]; // 清除狀態，完成預約
+            delete userStates[userId]; // 完成流程，刪除狀態
 
             return client.pushMessage(userId, {
                 type: 'text',
@@ -130,7 +137,7 @@ async function handlePostback(event) {
             });
 
         } catch (error) {
-            delete userStates[userId];
+            delete userStates[userId]; 
             console.error('Error during GAS communication:', error.response ? error.response.data : error.message);
             
             return client.pushMessage(userId, {
@@ -143,117 +150,10 @@ async function handlePostback(event) {
     return Promise.resolve(null);
 }
 
-// 產生預約表單 Flex Message 的函式 (此函式無須變動)
 function getBookingFlexMessage() {
-    return {
-      "type": "flex",
-      "altText": "AI智慧診所預約表單",
-      "contents": {
-        "type": "bubble",
-        "header": {
-          "type": "box",
-          "layout": "vertical",
-          "contents": [
-            {
-              "type": "text",
-              "text": "AI智慧診所預約",
-              "weight": "bold",
-              "size": "xl",
-              "color": "#FFFFFF"
-            }
-          ],
-          "backgroundColor": "#007BFF",
-          "paddingAll": "20px"
-        },
-        "body": {
-          "type": "box",
-          "layout": "vertical",
-          "spacing": "md",
-          "contents": [
-            {
-              "type": "text",
-              "text": "請點選下方按鈕，選擇日期與時間",
-              "wrap": true,
-              "size": "md"
-            },
-            {
-              "type": "separator"
-            },
-            {
-              "type": "box",
-              "layout": "horizontal",
-              "contents": [
-                {
-                  "type": "text",
-                  "text": "預約日期",
-                  "flex": 2,
-                  "gravity": "center",
-                  "weight": "bold"
-                },
-                {
-                  "type": "button",
-                  "action": {
-                    "type": "datetimepicker",
-                    "label": "選擇日期",
-                    "data": "action=select_date", // 送出 postback
-                    "mode": "date"
-                  },
-                  "flex": 5,
-                  "style": "secondary",
-                  "height": "sm"
-                }
-              ]
-            },
-            {
-              "type": "box",
-              "layout": "horizontal",
-              "contents": [
-                {
-                  "type": "text",
-                  "text": "預約時間",
-                  "flex": 2,
-                  "gravity": "center",
-                  "weight": "bold"
-                },
-                {
-                  "type": "button",
-                  "action": {
-                    "type": "datetimepicker",
-                    "label": "選擇時間",
-                    "data": "action=select_time", // 送出 postback
-                    "mode": "time"
-                  },
-                  "flex": 5,
-                  "style": "secondary",
-                  "height": "sm"
-                }
-              ]
-            }
-          ]
-        },
-        "footer": {
-          "type": "box",
-          "layout": "vertical",
-          "contents": [
-            {
-              "type": "button",
-              "action": {
-                "type": "postback",
-                "label": "送出預約",
-                "data": "action=submit_booking", // 送出 postback
-                "displayText": "正在為您處理預約..."
-              },
-              "style": "primary",
-              "color": "#007BFF"
-            }
-          ]
-        }
-      }
-    };
+    return {"type":"flex","altText":"AI智慧診所預約表單","contents":{"type":"bubble","header":{"type":"box","layout":"vertical","contents":[{"type":"text","text":"AI智慧診所預約","weight":"bold","size":"xl","color":"#FFFFFF"}],"backgroundColor":"#007BFF","paddingAll":"20px"},"body":{"type":"box","layout":"vertical","spacing":"md","contents":[{"type":"text","text":"請點選下方按鈕，選擇日期與時間","wrap":true,"size":"md"},{"type":"separator"},{"type":"box","layout":"horizontal","contents":[{"type":"text","text":"預約日期","flex":2,"gravity":"center","weight":"bold"},{"type":"button","action":{"type":"datetimepicker","label":"選擇日期","data":"action=select_date","mode":"date"},"flex":5,"style":"secondary","height":"sm"}]},{"type":"box","layout":"horizontal","contents":[{"type":"text","text":"預約時間","flex":2,"gravity":"center","weight":"bold"},{"type":"button","action":{"type":"datetimepicker","label":"選擇時間","data":"action=select_time","mode":"time"},"flex":5,"style":"secondary","height":"sm"}]}]},"footer":{"type":"box","layout":"vertical","contents":[{"type":"button","action":{"type":"postback","label":"送出預約","data":"action=submit_booking","displayText":"正在為您處理預約..."},"style":"primary","color":"#007BFF"}]}}};
 }
 
-
-// 監聽指定的 port
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
     console.log(`Server is listening on port ${port}`);
