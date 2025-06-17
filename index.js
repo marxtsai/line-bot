@@ -10,8 +10,10 @@ const axios = require('axios');
 
 // --- 配置區塊 (您的資訊) ---
 const config = {
-    channelAccessToken: 'i44rK1vCf9f9NGu1x/2w1umIY0fvPOrr9n5WLXqIn5anr73xF+Sy6nhuE3D2WMPPY2CeFPH271St3i3yrmd8bRKhI27XSnFnEH+L1dEej2kcnD6Bo9zXbzbjDy4mCTSFYsny4aLVrBo8X0igHWtIAdB04t89/1O/w1cDnyilFU=', // 請替換為您的 Channel Access Token
-    channelSecret: 'd52699ba45f0fe91d719b81492cc29dd', // 請替換為您的 Channel Secret
+    // 這是您提供的【全新】Channel Access Token
+    channelAccessToken: 'xM7IHdUqhKDirz8WiMBEK/Dhu5OKtHcXyoRla3YcU/x+ZRiUxJeQBVL/QGD5uOTCY2CeFPHq271St3i3yrmd8bRKhI27XSnFnEH+L1dEej1IW4OZpsS1fDmEQRFlIDDfrK3UifD9KHVnB0qWp00PfAdB04t89/1O/w1cDnyilFU=',
+    // Channel Secret 保持與之前相同，假設它是正確的
+    channelSecret: 'd52699ba45f0fe91d719b81492cc29dd',
 };
 
 // 這是您部署的 Google Apps Script (GAS) 網址
@@ -39,6 +41,8 @@ app.post('/webhook', line.middleware(config), (req, res) => {
         .then((result) => res.json(result))
         .catch((err) => {
             console.error('Webhook Error:', err);
+            // 由於 401 錯誤會被 LINE Bot SDK 拋出，這裡會捕捉到並記錄
+            // 應確保 channelAccessToken 和 channelSecret 是正確的
             res.status(500).end();
         });
 });
